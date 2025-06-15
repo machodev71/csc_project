@@ -1,8 +1,6 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, session, send_file, jsonify    
-import psycopg2
-from psycopg2 import Error as PGError
-from psycopg2.extras import DictCursor
-from psycopg2.pool import SimpleConnectionPool
+import mysql.connector
+from mysql.connector import Error
 from datetime import datetime, date, timedelta    
 import pandas as pd
 import csv
@@ -26,8 +24,8 @@ app = Flask(__name__)
 app.secret_key = 'your_secret_key'
 
 # MySQL Root Configuration
-POSTGRES_ROOT_USER = 'postgres'  # Default PostgreSQL superuser
-POSTGRES_ROOT_PASSWORD = '' 
+MYSQL_ROOT_USER = 'root'
+MYSQL_ROOT_PASSWORD = 'shakthi19'
 
 # Admin database name
 ADMIN_DB = 'admin_db'
@@ -38,36 +36,43 @@ razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
 def connect_db(user, password, db):
     try:
-        connection = psycopg2.connect(
-            host="168.231.121.30",  # Updated to VPN server IP
+        connection = mysql.connector.connect(
+            host="127.0.0.1",
             user=user,
             password=password,
             database=db,
-            cursor_factory=DictCursor
+            charset='utf8'
         )
         return connection
-    except PGError as e:
-        print(f"PostgreSQL Error: {e}")
+    except Error as e:
+        print(f"Error: {e}")
         return None
         
 def get_logo_path(db, user):
     DATABASES = get_databases()
     if db not in DATABASES:
-        return 'image/logo.png'
+        return None  # None means no logo set
     connection = connect_db(user, DATABASES[db]['password'], db)
     if connection:
         cursor = connection.cursor(dictionary=True)
         try:
             cursor.execute("SELECT logo_path FROM user_settings WHERE user = %s", (user,))
             result = cursor.fetchone()
-            return result['logo_path'] if result and result['logo_path'] else 'image/logo.png'
+            if result and result['logo_path']:
+                return result['logo_path']
+            # Check if user is new (no record in user_settings)
+            cursor.execute("SELECT COUNT(*) as count FROM user_settings WHERE user = %s", (user,))
+            count_result = cursor.fetchone()
+            if count_result['count'] == 0:
+                return "new_user"  # Special value to indicate new user
+            return None
         except Error as e:
             print(f"Error fetching logo path: {e}")
-            return 'image/logo.png'
+            return None
         finally:
             cursor.close()
             connection.close()
-    return 'image/logo.png'
+    return None
 
 def get_databases():
     admin_conn = get_admin_connection()
@@ -127,28 +132,30 @@ def allowed_file(filename):
 
 def get_root_connection():
     try:
-        return psycopg2.connect(
-            host="168.231.121.30",
-            user=MYSQL_ROOT_USER,  # You may want to rename this to POSTGRES_ROOT_USER
-            password=MYSQL_ROOT_PASSWORD,  # Rename to POSTGRES_ROOT_PASSWORD
-            cursor_factory=DictCursor
+        return mysql.connector.connect(
+            host="127.0.0.1",  # Update if different
+            port=3306,        # Update if different
+            user=MYSQL_ROOT_USER,
+            password=MYSQL_ROOT_PASSWORD,
+            charset='utf8'
         )
-    except PGError as e:
+    except Error as e:
         logger.error(f"Root connection error: {e}")
         return None
 
 def get_admin_connection():
     try:
-        conn = psycopg2.connect(
-            host="168.231.121.30",
-            user=MYSQL_ROOT_USER,
-            password=MYSQL_ROOT_PASSWORD,
-            database=ADMIN_DB,
-            cursor_factory=DictCursor
-        )
+        conn = mysql.connector.connect(
+                host="127.0.0.1",  # Update if different
+                port=3306,        # Update if different
+                user=MYSQL_ROOT_USER,
+                password=MYSQL_ROOT_PASSWORD,
+                database=ADMIN_DB,
+                charset='utf8'
+            )
         logger.info(f"Successfully connected to {ADMIN_DB}")
         return conn
-    except PGError as e:
+    except Error as e:
         logger.error(f"Admin connection error: {e}")
         return None
 
@@ -173,25 +180,23 @@ def is_digit(value):
     return str(value).isdigit()
 app.jinja_env.filters['is_digit'] = is_digit
 
-# Replace all database initialization code with PostgreSQL version
 def initialize_admin_database():
     root_conn = get_root_connection()
     if not root_conn:
-        print("Failed to connect as postgres user")
-    return
+        print("Failed to connect as root user")
+        return
         
     cursor = root_conn.cursor()
     try:
-        cursor.execute(f"SELECT 1 FROM pg_database WHERE datname = '{ADMIN_DB}'")
-        if not cursor.fetchone():
-            cursor.execute(f"CREATE DATABASE {ADMIN_DB}")
+        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {ADMIN_DB}")
+        root_conn.commit()
             
         admin_conn = get_admin_connection()
-        admin_cursor = admin_conn.cursor()
+        admin_cursor = admin_conn.cursor(dictionary=True)
             
         admin_cursor.execute("""
             CREATE TABLE IF NOT EXISTS admin_users (
-                id SERIAL PRIMARY KEY,
+                id INT AUTO_INCREMENT PRIMARY KEY,
                 username VARCHAR(50) UNIQUE NOT NULL,
                 password VARCHAR(255) NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -200,17 +205,17 @@ def initialize_admin_database():
             
         admin_cursor.execute("""
             CREATE TABLE IF NOT EXISTS database_configs (
-                id SERIAL PRIMARY KEY,
+                id INT AUTO_INCREMENT PRIMARY KEY,
                 db_name VARCHAR(50) UNIQUE NOT NULL,
                 db_user VARCHAR(50) NOT NULL,
                 db_password VARCHAR(255) NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP
+                updated_at DATETIME
             )
         """)
             
         admin_cursor.execute("SELECT COUNT(*) as count FROM admin_users")
-        admin_count = admin_cursor.fetchone()[0]
+        admin_count = admin_cursor.fetchone()['count']
             
         if admin_count == 0:
             default_admin = 'admin'
@@ -223,7 +228,7 @@ def initialize_admin_database():
             
         admin_conn.commit()
             
-    except PGError as e:
+    except Error as e:
         print(f"Admin database initialization error: {e}")
     finally:
         if 'admin_cursor' in locals():
@@ -321,27 +326,18 @@ def check_access():
         user_conn.close()
 
 def migrate_database_schema(user_cursor, db_name):
-    """Handle database schema migrations for existing tables (PostgreSQL version)"""
+    """Handle database schema migrations for existing tables"""
     try:
-        # Get all tables
-        user_cursor.execute("""
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = 'public'
-        """)
-        tables = [row['table_name'] for row in user_cursor.fetchall()]
+        # Get all tables first
+        user_cursor.execute("SHOW TABLES")
+        tables = [row[0] for row in user_cursor.fetchall()]
         
         if 'user_settings' not in tables:
             return  # Skip if user_settings doesn't exist
 
         # Check and add columns to student_information_sheet if table exists
         if 'student_information_sheet' in tables:
-            user_cursor.execute("""
-                SELECT column_name 
-    FROM information_schema.columns 
-    WHERE table_name = 'student_information_sheet' 
-    AND column_name = 'scheme'
-            """)
+            user_cursor.execute("SHOW COLUMNS FROM student_information_sheet LIKE 'scheme'")
             if not user_cursor.fetchone():
                 user_cursor.execute("""
                     ALTER TABLE student_information_sheet 
@@ -351,24 +347,24 @@ def migrate_database_schema(user_cursor, db_name):
 
         # Check and add columns to user_settings
         user_cursor.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name = 'user_settings' 
-            AND table_schema = 'public'
-        """)
-        existing_columns = {row['column_name'] for row in user_cursor.fetchall()}
+            SELECT COLUMN_NAME 
+            FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE TABLE_NAME = 'user_settings' 
+            AND TABLE_SCHEMA = %s
+        """, (db_name,))
+        existing_columns = {row[0] for row in user_cursor.fetchall()}
         
         if 'trial_end_date' not in existing_columns:
             user_cursor.execute("""
                 ALTER TABLE user_settings 
-                ADD COLUMN trial_end_date TIMESTAMP
+                ADD COLUMN trial_end_date DATETIME
             """)
             logger.info(f"Added 'trial_end_date' column to user_settings in {db_name}")
 
         if 'subscription_end_date' not in existing_columns:
             user_cursor.execute("""
                 ALTER TABLE user_settings 
-                ADD COLUMN subscription_end_date TIMESTAMP
+                ADD COLUMN subscription_end_date DATETIME
             """)
             logger.info(f"Added 'subscription_end_date' column to user_settings in {db_name}")
 
@@ -382,21 +378,21 @@ def migrate_database_schema(user_cursor, db_name):
         if 'last_payment_date' not in existing_columns:
             user_cursor.execute("""
                 ALTER TABLE user_settings 
-                ADD COLUMN last_payment_date TIMESTAMP
+                ADD COLUMN last_payment_date DATETIME
             """)
             logger.info(f"Added 'last_payment_date' column to user_settings in {db_name}")
 
         if 'next_renewal_date' not in existing_columns:
             user_cursor.execute("""
                 ALTER TABLE user_settings 
-                ADD COLUMN next_renewal_date TIMESTAMP
+                ADD COLUMN next_renewal_date DATETIME
             """)
             logger.info(f"Added 'next_renewal_date' column to user_settings in {db_name}")
 
         if 'max_students' not in existing_columns:
             user_cursor.execute("""
                 ALTER TABLE user_settings 
-                ADD COLUMN max_students INTEGER DEFAULT 2147483647
+                ADD COLUMN max_students INT DEFAULT 2147483647
             """)
             logger.info(f"Added 'max_students' column to user_settings in {db_name}")
 
@@ -407,12 +403,12 @@ def migrate_database_schema(user_cursor, db_name):
         # Check and add columns to payment_invoices
         if 'payment_invoices' in tables:
             user_cursor.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name = 'payment_invoices'
-                AND table_schema = 'public'
-            """)
-            payment_invoice_columns = {row['column_name'] for row in user_cursor.fetchall()}
+                SELECT COLUMN_NAME 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_NAME = 'payment_invoices'
+                AND TABLE_SCHEMA = %s
+            """, (db_name,))
+            payment_invoice_columns = {row[0] for row in user_cursor.fetchall()}
 
             if 'plan_type' not in payment_invoice_columns:
                 user_cursor.execute("""
@@ -428,12 +424,12 @@ def migrate_database_schema(user_cursor, db_name):
                 """)
                 logger.info(f"Added 'invoice_number' column to payment_invoices in {db_name}")
 
-    except PGError as e:
+    except Error as e:
         logger.error(f"Error during schema migration for {db_name}: {e}")
         raise
 
 def initialize_databases():
-    """Initialize all databases with required tables and schema (PostgreSQL version)"""
+    """Initialize all databases with required tables and schema"""
     logger.info("Starting database initialization...")
     
     try:
@@ -445,7 +441,7 @@ def initialize_databases():
         if not admin_conn:
             raise Exception("Failed to connect to admin database")
             
-        with admin_conn.cursor() as admin_cursor:
+        with admin_conn.cursor(dictionary=True) as admin_cursor:
             admin_cursor.execute("""
                 SELECT db_name, db_user, db_password, updated_at 
                 FROM database_configs
@@ -466,20 +462,17 @@ def initialize_databases():
         with root_conn.cursor() as root_cursor:
             for db_name, creds in databases.items():
                 try:
-                    # Check if database exists
-                    root_cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db_name,))
-                    if not root_cursor.fetchone():
-                        root_cursor.execute(f"CREATE DATABASE {db_name}")
-                    
-                    # Create user if not exists
-                    root_cursor.execute("SELECT 1 FROM pg_user WHERE usename = %s", (creds['user'],))
-                    if not root_cursor.fetchone():
-                        root_cursor.execute(f"CREATE USER {creds['user']} WITH PASSWORD '{creds['password']}'")
-                    
-                    # Grant privileges
-                    root_cursor.execute(f"GRANT ALL PRIVILEGES ON DATABASE {db_name} TO {creds['user']}")
+                    root_cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name}")
+                    root_cursor.execute(f"""
+                        CREATE USER IF NOT EXISTS '{creds['user']}'@'localhost' 
+                        IDENTIFIED BY '{creds['password']}'
+                    """)
+                    root_cursor.execute(f"""
+                        GRANT ALL PRIVILEGES ON {db_name}.* 
+                        TO '{creds['user']}'@'localhost'
+                    """)
                     logger.info(f"Configured database {db_name} for user {creds['user']}")
-                except PGError as e:
+                except Error as e:
                     logger.error(f"Error setting up database {db_name}: {e}")
                     raise Exception(f"Database setup failed for {db_name}: {e}")
             root_conn.commit()
@@ -491,10 +484,9 @@ def initialize_databases():
                 if not user_conn:
                     raise Exception(f"Failed to connect to database {db_name}")
                 with user_conn.cursor() as user_cursor:
-                    # Create student_details table
                     user_cursor.execute("""
                         CREATE TABLE IF NOT EXISTS student_details (
-                            id SERIAL PRIMARY KEY,
+                            id INT AUTO_INCREMENT PRIMARY KEY,
                             enroll_no VARCHAR(50) UNIQUE NOT NULL,
                             course VARCHAR(100) NOT NULL,
                             sex VARCHAR(10),
@@ -508,7 +500,7 @@ def initialize_databases():
                             pincode VARCHAR(20),
                             qualification VARCHAR(100),
                             date_of_join DATE,
-                            age INTEGER,
+                            age INT,
                             scheme VARCHAR(100),
                             date_of_birth DATE,
                             concession VARCHAR(100),
@@ -517,26 +509,22 @@ def initialize_databases():
                             fees DECIMAL(10, 2) DEFAULT 0,
                             balance_fees DECIMAL(10, 2) DEFAULT 0,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            updated_at TIMESTAMP
+                            updated_at DATETIME
                         )
                     """)
-                    
-                    # Create fee_payments table
                     user_cursor.execute("""
                         CREATE TABLE IF NOT EXISTS fee_payments (
-                            id SERIAL PRIMARY KEY,
+                            id INT AUTO_INCREMENT PRIMARY KEY,
                             enroll_no VARCHAR(50) NOT NULL,
                             fee_amount DECIMAL(10, 2) NOT NULL,
                             bill_number VARCHAR(50) NOT NULL,
-                            payment_date TIMESTAMP NOT NULL,
+                            payment_date DATETIME NOT NULL,
                             FOREIGN KEY (enroll_no) REFERENCES student_details(enroll_no) ON DELETE CASCADE
                         )
                     """)
-                    
-                    # Create student_information_sheet table
                     user_cursor.execute("""
                         CREATE TABLE IF NOT EXISTS student_information_sheet (
-                            id SERIAL PRIMARY KEY,
+                            id INT AUTO_INCREMENT PRIMARY KEY,
                             sno VARCHAR(50),
                             name VARCHAR(100) NOT NULL,
                             father_name VARCHAR(100),
@@ -554,36 +542,32 @@ def initialize_databases():
                             scheme VARCHAR(100) DEFAULT 'NONE',
                             status VARCHAR(20) DEFAULT 'Pending',
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            updated_at TIMESTAMP
+                            updated_at DATETIME
                         )
                     """)
-                    
-                    # Create user_settings table
                     user_cursor.execute("""
                         CREATE TABLE IF NOT EXISTS user_settings (
-                            id SERIAL PRIMARY KEY,
+                            id INT AUTO_INCREMENT PRIMARY KEY,
                             user VARCHAR(50) NOT NULL,
                             membership_plan VARCHAR(50) DEFAULT 'Trial',
                             membership_payment DECIMAL(10, 2) DEFAULT 0.00,
                             logo_path VARCHAR(255) DEFAULT 'image/logo.png',
-                            trial_start_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            trial_end_date TIMESTAMP,
-                            subscription_start_date TIMESTAMP,
-                            subscription_end_date TIMESTAMP,
+                            trial_start_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            trial_end_date DATETIME,
+                            subscription_start_date DATETIME,
+                            subscription_end_date DATETIME,
                             payment_status VARCHAR(20) DEFAULT 'inactive',
-                            last_payment_date TIMESTAMP,
-                            next_renewal_date TIMESTAMP,
-                            max_students INTEGER DEFAULT 2147483647,
+                            last_payment_date DATETIME,
+                            next_renewal_date DATETIME,
+                            max_students INT DEFAULT 2147483647,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            updated_at TIMESTAMP,
+                            updated_at DATETIME,
                             UNIQUE (user)
                         )
                     """)
-                    
-                    # Create payment_invoices table
                     user_cursor.execute("""
                         CREATE TABLE IF NOT EXISTS payment_invoices (
-                            id SERIAL PRIMARY KEY,
+                            id INT AUTO_INCREMENT PRIMARY KEY,
                             user VARCHAR(50) NOT NULL,
                             order_id VARCHAR(100) NOT NULL,
                             payment_id VARCHAR(100),
@@ -594,21 +578,18 @@ def initialize_databases():
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                     """)
-                    
-                    # Run schema migrations
                     migrate_database_schema(user_cursor, db_name)
-                    
                     if creds.get('trial_expires'):
                         user_cursor.execute("""
                             INSERT INTO user_settings (
                                 user, membership_plan, membership_payment, 
                                 logo_path, trial_end_date, updated_at
                             ) VALUES (%s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (user) DO UPDATE SET
-                                membership_plan = EXCLUDED.membership_plan,
-                                membership_payment = EXCLUDED.membership_payment,
-                                trial_end_date = EXCLUDED.trial_end_date,
-                                updated_at = EXCLUDED.updated_at
+                            ON DUPLICATE KEY UPDATE
+                                membership_plan = VALUES(membership_plan),
+                                membership_payment = VALUES(membership_payment),
+                                trial_end_date = VALUES(trial_end_date),
+                                updated_at = VALUES(updated_at)
                         """, (
                             creds['user'],
                             'Trial',
@@ -619,7 +600,7 @@ def initialize_databases():
                         ))
                     user_conn.commit()
                     logger.info(f"Successfully initialized database: {db_name}")
-            except PGError as e:
+            except Error as e:
                 logger.error(f"Error initializing database {db_name}: {e}")
                 if user_conn:
                     user_conn.rollback()
@@ -700,8 +681,8 @@ def register():
             root_cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name}")
                 
             # Create user if not exists and grant privileges
-            root_cursor.execute(f"CREATE USER IF NOT EXISTS '{username}'@'%' IDENTIFIED BY '{password}'")
-            root_cursor.execute(f"GRANT ALL PRIVILEGES ON {db_name}.* TO '{username}'@'%'")
+            root_cursor.execute(f"CREATE USER IF NOT EXISTS '{username}'@'localhost' IDENTIFIED BY '{password}'")
+            root_cursor.execute(f"GRANT ALL PRIVILEGES ON {db_name}.* TO '{username}'@'localhost'")
             root_cursor.execute("FLUSH PRIVILEGES")
             root_conn.commit()
         except Error as e:
@@ -877,13 +858,7 @@ def account(db):
     cursor = connection.cursor(dictionary=True)
     try:
         # Check if payment_status column exists
-        # To this PostgreSQL equivalent:
-        cursor.execute("""
-    SELECT column_name 
-    FROM information_schema.columns 
-    WHERE table_name = 'user_settings' 
-    AND column_name = 'payment_status'
-""")
+        cursor.execute("SHOW COLUMNS FROM user_settings LIKE 'payment_status'")
         has_payment_status = cursor.fetchone() is not None
             
         # Build query based on whether column exists
@@ -965,14 +940,17 @@ def account(db):
         invoices = cursor.fetchall()
             
         logo_path = get_logo_path(db, session['user'])
-            
+        if not logo_path or logo_path == "new_user":
+            logo_path = 'image/default_logo.png'  # Default fallback
+        user_info['logo_path'] = logo_path  # Ensure this is always a non-empty string
+    
         return render_template('account.html',
-                            db=db,
-                            user=session['user'],
-                            user_info=user_info,
-                            invoices=invoices,
-                            logo_path=logo_path,
-                            now=current_date)
+                        db=db,
+                        user=session['user'],
+                        user_info=user_info,
+                        invoices=invoices,
+                        logo_path=logo_path,
+                        now=current_date)
     except Error as e:
         flash(f'Database error: {str(e)}', 'danger')
         return redirect(url_for('user_dashboard', db=db))
@@ -1176,6 +1154,20 @@ def logo_upload(db):
     cursor = connection.cursor(dictionary=True)
     try:
         if request.method == 'POST':
+            # Handle logo removal
+            if 'remove_logo' in request.form:
+                cursor.execute("""
+                    INSERT INTO user_settings (user, logo_path, updated_at)
+                    VALUES (%s, NULL, %s)
+                    ON DUPLICATE KEY UPDATE
+                    logo_path = NULL,
+                    updated_at = %s
+                """, (user, datetime.now(), datetime.now()))
+                connection.commit()
+                flash('Logo removed successfully', 'success')
+                return redirect(url_for('logo_upload', db=db))
+            
+            # Handle logo upload
             if 'photo' not in request.files:
                 flash('No file uploaded', 'danger')
                 return redirect(url_for('logo_upload', db=db))
@@ -1212,9 +1204,14 @@ def logo_upload(db):
         # Fetch current logo for display
         cursor.execute("SELECT logo_path FROM user_settings WHERE user = %s", (user,))
         user_settings = cursor.fetchone()
-        logo_path = user_settings['logo_path'] if user_settings and user_settings['logo_path'] else 'image/logo.png'
+        logo_path = user_settings['logo_path'] if user_settings and user_settings['logo_path'] else None
         
-        return render_template('logo_upload.html', db=db, logo_path=logo_path)
+        # Check if user is new (no record in user_settings)
+        cursor.execute("SELECT COUNT(*) as count FROM user_settings WHERE user = %s", (user,))
+        count_result = cursor.fetchone()
+        is_new_user = count_result['count'] == 0
+        
+        return render_template('logo_upload.html', db=db, logo_path=logo_path, is_new_user=is_new_user)
     
     except Error as e:
         flash(f'Database error: {str(e)}', 'danger')
@@ -1321,14 +1318,10 @@ def analytics_dashboard(db):
         enrollment_trends = []
         not_joined_students = []
 
-        # Log query parameters for debugging
-        logger.debug(f"Period: {period}, Start Date: {start_date}, End Date: {end_date}, Params: {params}")
-
         # Fetch total students count
         query = f"SELECT COUNT(*) as total_students FROM student_details {date_condition}"
         cursor.execute(query, params)
         total_students = cursor.fetchone()['total_students'] or 0
-        logger.debug(f"Total Students: {total_students}")
 
         # Fetch active learners (students with activity in date range)
         if period != 'not_joined':
@@ -1345,7 +1338,6 @@ def analytics_dashboard(db):
             cursor.execute(query, params * 2 if fee_date_condition else params)
             active_learners = cursor.fetchone()['active_learners'] or 0
             inactive_learners = total_students - active_learners
-            logger.debug(f"Active Learners: {active_learners}, Inactive: {inactive_learners}")
         else:
             active_learners = 0
             inactive_learners = 0
@@ -1360,7 +1352,6 @@ def analytics_dashboard(db):
         cursor.execute(query, params)
         course_counts = {row['course'] or 'Unknown': row['count'] for row in cursor.fetchall()}
         total_courses = len(course_counts)
-        logger.debug(f"Course Counts: {course_counts}")
 
         # Fetch payment status counts
         query = f"""
@@ -1374,7 +1365,6 @@ def analytics_dashboard(db):
         payment_status = cursor.fetchone()
         fully_paid_count = payment_status['fully_paid'] or 0
         pending_count = payment_status['pending'] or 0
-        logger.debug(f"Fully Paid: {fully_paid_count}, Pending: {pending_count}")
 
         # Fetch revenue data
         query = f"""
@@ -1389,7 +1379,6 @@ def analytics_dashboard(db):
         total_revenue = float(revenue_data['total_revenue'] or 0)
         collected_revenue = float(revenue_data['collected_revenue'] or 0)
         pending_payments = total_revenue - collected_revenue
-        logger.debug(f"Total Revenue: {total_revenue}, Collected: {collected_revenue}, Pending: {pending_payments}")
 
         # Fetch course performance
         query = f"""
@@ -1412,7 +1401,6 @@ def analytics_dashboard(db):
                 'total_fees': float(row['total_fees'] or 0)
             } for row in cursor.fetchall()
         ]
-        logger.debug(f"Course Performance: {course_performance}")
 
         # Fetch enrollment trends
         if period != 'not_joined':
@@ -1434,7 +1422,6 @@ def analytics_dashboard(db):
                     'revenue': float(row['daily_revenue'] or 0)
                 } for row in cursor.fetchall()
             ]
-        logger.debug(f"Enrollment Trends: {enrollment_trends}")
 
         # Fetch not joined students with both mobile numbers
         if period == 'not_joined':
@@ -1457,13 +1444,15 @@ def analytics_dashboard(db):
                         'created_at': row['created_at']
                     } for row in cursor.fetchall()
                 ]
-                logger.debug(f"Not Joined Students: {not_joined_students}")
 
         # Get top course by fees and enrollments
         max_fee_course = max(course_performance, key=lambda x: x['total_fees'], default={'course': 'None', 'total_fees': 0})
         max_student_course = max(course_performance, key=lambda x: x['total_students'], default={'course': 'None', 'total_students': 0})
 
-        logo_path = get_logo_path(db, user)
+        # Get logo path with fallback to default
+        logo_path = get_logo_path(db, session['user'])
+        if not logo_path or logo_path == "new_user":
+            logo_path = 'image/default_logo.png'  # Default fallback
 
         return render_template(
             'analytics_dashboard.html',
@@ -1490,8 +1479,8 @@ def analytics_dashboard(db):
             max_student_count=max_student_course['total_students'],
             not_joined_students=not_joined_students,
             today=today,
-            start_date=start_date_str or start_date,  # Pass start_date for form
- jede= end_date_str or end_date  # Pass end_date for form
+            start_date=start_date_str or start_date,
+            end_date=end_date_str or end_date
         )
 
     except Exception as e:
@@ -1647,17 +1636,9 @@ def admin_panel():
         
         # ✅ Use your desired SELECT logic here (with LEFT JOIN for user_settings)
         cursor.execute("""
-            SELECT dc.id, dc.db_name, dc.db_user, dc.db_password, 
-                dc.updated_at as trial_end_date,
-                us.membership_plan, us.payment_status,
-                us.subscription_end_date
-            FROM database_configs dc
-            LEFT JOIN (
-                SELECT user, membership_plan, payment_status, subscription_end_date
-                FROM user_settings
-                GROUP BY user
-            ) us ON dc.db_user = us.user
-        """)
+    SELECT id, db_name, db_user, db_password, updated_at as trial_end_date
+    FROM database_configs
+""")
         configs = cursor.fetchall()
         now = datetime.now()
         
@@ -2232,6 +2213,11 @@ def fees(db):
         if connection:
             connection.close()
 
+import io
+from flask import request, session, redirect, url_for, flash, send_file
+import csv
+from mysql.connector import Error
+
 @app.route('/export_application/<db>/<table_name>', methods=['GET'])
 def export_application(db, table_name):
     user = session.get('user')
@@ -2244,83 +2230,79 @@ def export_application(db, table_name):
         return redirect(url_for('login'))
 
     connection = connect_db(user, DATABASES[db]['password'], db)
-    if connection:
-        cursor = connection.cursor(dictionary=True)
-        try:
-            course = request.args.get('course', '').strip()
-            gender = request.args.get('gender', '').strip()
-
-            query = """
-                SELECT 
-        sd.name,
-        sis.father_name,
-        COALESCE(sis.mobile_number1, '') AS mobile_number1,
-        COALESCE(sis.mobile_number2, '') AS mobile_number2,
-        sd.course,
-        TO_CHAR(sd.created_at, 'YYYY-MM-DD') as created_at
-    FROM student_details sd
-    LEFT JOIN student_information_sheet sis 
-        ON LOWER(TRIM(sd.name)) = LOWER(TRIM(sis.name))
-    WHERE 1=1
-            """
-            params = []
-
-            if course:
-                query += " AND sd.course = %s"
-                params.append(course)
-            if gender:
-                query += " AND sd.sex = %s"
-                params.append(gender)
-
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-
-            if not rows:
-                flash('No data available to export with the applied filters.', 'danger')
-                return redirect(url_for('user_dashboard', db=db, course=course, gender=gender))
-
-            fieldnames = ['Name', 'Father Name', 'Mobile Number 1', 'Mobile Number 2', 'Course', 'Created Date']
-
-            output = io.StringIO()
-            writer = csv.writer(output)
-            writer.writerow(fieldnames)
-
-            for row in rows:
-                created_date = row['created_at'].strftime('%Y-%m-%d') if row['created_at'] else ''
-                writer.writerow([
-                    row.get('name', ''),
-                    row.get('father_name', ''),
-                    row.get('mobile_number1', ''),
-                    row.get('mobile_number2', ''),
-                    row.get('course', ''),
-                    created_date
-                ])
-
-            output.seek(0)
-
-            filter_parts = []
-            if course:
-                filter_parts.append(f"course_{course}")
-            if gender:
-                filter_parts.append(f"gender_{gender}")
-            filter_suffix = "_" + "_".join(filter_parts) if filter_parts else ""
-
-            return send_file(
-                io.BytesIO(output.getvalue().encode('utf-8')),
-                mimetype='text/csv',
-                as_attachment=True,
-                download_name=f'{table_name}{filter_suffix}.csv'
-            )
-
-        except Error as e:
-            flash(f"Failed to export data: {e}", "danger")
-            return redirect(url_for('user_dashboard', db=db))
-        finally:
-            cursor.close()
-            connection.close()
-    else:
+    if not connection:
         flash('Failed to connect to the database', "danger")
         return redirect(url_for('login'))
+
+    cursor = connection.cursor(dictionary=True)
+    try:
+        course = request.args.get('course', '').strip()
+        gender = request.args.get('gender', '').strip()
+
+        query = """
+            SELECT 
+                name,
+                COALESCE(mobile_number1, '') AS mobile_number1,
+                COALESCE(mobile_number2, '') AS mobile_number2,
+                course,
+                created_at
+            FROM student_details
+            WHERE 1=1
+        """
+        params = []
+
+        if course:
+            query += " AND course = %s"
+            params.append(course)
+        if gender:
+            query += " AND sex = %s"
+            params.append(gender)
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+
+        if not rows:
+            flash('No data available to export with the applied filters.', 'danger')
+            return redirect(url_for('user_dashboard', db=db, course=course, gender=gender))
+
+        fieldnames = ['Name', 'Mobile Number 1', 'Mobile Number 2', 'Course', 'Created Date']
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(fieldnames)
+
+        for row in rows:
+            created_date = row['created_at'].strftime('%Y-%m-%d') if row['created_at'] else ''
+            writer.writerow([
+                row.get('name', ''),
+                row.get('mobile_number1', ''),
+                row.get('mobile_number2', ''),
+                row.get('course', ''),
+                created_date
+            ])
+
+        output.seek(0)
+
+        filter_parts = []
+        if course:
+            filter_parts.append(f"course_{course}")
+        if gender:
+            filter_parts.append(f"gender_{gender}")
+        filter_suffix = "_" + "_".join(filter_parts) if filter_parts else ""
+
+        return send_file(
+            io.BytesIO(output.getvalue().encode('utf-8')),
+            mimetype='text/csv',
+            as_attachment=True,
+            download_name=f'{table_name}{filter_suffix}.csv'
+        )
+
+    except Error as e:
+        flash(f"Failed to export data: {e}", "danger")
+        return redirect(url_for('user_dashboard', db=db))
+    finally:
+        cursor.close()
+        connection.close()
 
 @app.route('/export_information/<db>', methods=['GET'])
 def export_information(db):
@@ -3282,7 +3264,10 @@ def user_settings(db):
         return redirect(url_for('login'))
 
     cursor = connection.cursor(dictionary=True)
-    logo_path = get_logo_path(db, user)
+    logo_path = get_logo_path(db, session['user'])
+    if not logo_path or logo_path == "new_user":
+        logo_path = 'image/default_logo.png'  # Default fallback
+
     now = datetime.now()
 
     if request.method == 'POST':
@@ -3365,4 +3350,4 @@ def logout():
 
 if __name__ == '__main__':
     initialize_databases()
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True) 
