@@ -26,8 +26,8 @@ app = Flask(__name__)
 app.secret_key = 'your_secret_key'
 
 # MySQL Root Configuration
-MYSQL_ROOT_USER = 'root'
-MYSQL_ROOT_PASSWORD = ''
+POSTGRES_ROOT_USER = 'postgres'  # Default PostgreSQL superuser
+POSTGRES_ROOT_PASSWORD = '' 
 
 # Admin database name
 ADMIN_DB = 'admin_db'
@@ -177,8 +177,8 @@ app.jinja_env.filters['is_digit'] = is_digit
 def initialize_admin_database():
     root_conn = get_root_connection()
     if not root_conn:
-        print("Failed to connect as root user")
-        return
+        print("Failed to connect as postgres user")
+    return
         
     cursor = root_conn.cursor()
     try:
@@ -338,9 +338,9 @@ def migrate_database_schema(user_cursor, db_name):
         if 'student_information_sheet' in tables:
             user_cursor.execute("""
                 SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name = 'student_information_sheet' 
-                AND column_name = 'scheme'
+    FROM information_schema.columns 
+    WHERE table_name = 'student_information_sheet' 
+    AND column_name = 'scheme'
             """)
             if not user_cursor.fetchone():
                 user_cursor.execute("""
@@ -877,7 +877,13 @@ def account(db):
     cursor = connection.cursor(dictionary=True)
     try:
         # Check if payment_status column exists
-        cursor.execute("SHOW COLUMNS FROM user_settings LIKE 'payment_status'")
+        # To this PostgreSQL equivalent:
+        cursor.execute("""
+    SELECT column_name 
+    FROM information_schema.columns 
+    WHERE table_name = 'user_settings' 
+    AND column_name = 'payment_status'
+""")
         has_payment_status = cursor.fetchone() is not None
             
         # Build query based on whether column exists
@@ -2246,16 +2252,16 @@ def export_application(db, table_name):
 
             query = """
                 SELECT 
-                    sd.name,
-                    sis.father_name,
-                    COALESCE(sis.mobile_number1, '') AS mobile_number1,
-                    COALESCE(sis.mobile_number2, '') AS mobile_number2,
-                    sd.course,
-                    sd.created_at
-                FROM student_details sd
-                LEFT JOIN student_information_sheet sis 
-                    ON LOWER(TRIM(sd.name)) = LOWER(TRIM(sis.name))
-                WHERE 1=1
+        sd.name,
+        sis.father_name,
+        COALESCE(sis.mobile_number1, '') AS mobile_number1,
+        COALESCE(sis.mobile_number2, '') AS mobile_number2,
+        sd.course,
+        TO_CHAR(sd.created_at, 'YYYY-MM-DD') as created_at
+    FROM student_details sd
+    LEFT JOIN student_information_sheet sis 
+        ON LOWER(TRIM(sd.name)) = LOWER(TRIM(sis.name))
+    WHERE 1=1
             """
             params = []
 
